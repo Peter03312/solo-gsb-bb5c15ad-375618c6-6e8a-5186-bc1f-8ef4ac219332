@@ -187,6 +187,12 @@ select, input[type=text], input[type=password], input[type=number] {
   paint-order: stroke; stroke: #fbfcfe; stroke-width: 4px; stroke-linejoin: round;
   pointer-events: none; font-weight: 600;
 }
+/* 临时封锁标记（区段下方的红色 ⊘ 标签） */
+.blk-tag {
+  font-size: 11px; fill: #b03030; text-anchor: middle;
+  paint-order: stroke; stroke: #fbfcfe; stroke-width: 4px; stroke-linejoin: round;
+  pointer-events: none; font-weight: 700;
+}
 .endpoint-label { font-size: 12px; fill: var(--muted); text-anchor: middle; pointer-events: none; }
 
 /* 右侧控制区 */

@@ -151,6 +151,15 @@ function renderYard() {
     const tag = el('text', { x: mx, y: my, class: 'tag-label' }, `${sec.id}`);
     tag.addEventListener('click', () => { selectedSection = sec.id; renderSide(); });
     svg.appendChild(tag);
+
+    // 临时封锁标记
+    const blk = blockadeOf(sec.id);
+    if (blk) {
+      const t = el('text', { x: mx, y: (sec.y1 + sec.y2) / 2 + 16, class: 'blk-tag' },
+        blk.status === 'active' ? '⊘封锁中' : '⊘封锁待生效');
+      t.appendChild(el('title', {}, `临时封锁申请 #${blk.id}：${blk.reason}`));
+      svg.appendChild(t);
+    }
   }
 
   // 道岔核心
@@ -216,11 +225,43 @@ function renderSide() {
   if (currentRouteObj()) {
     side.appendChild(renderRouteOps());
   }
+  side.appendChild(renderBlockadePanel());
   side.appendChild(renderWaitingPanel());
   side.appendChild(renderCancellationPanel());
   side.appendChild(renderSwitchPanel());
   side.appendChild(renderSectionPanel());
   side.appendChild(renderInstances());
+}
+
+/* ------------------------------- 临时封锁 ------------------------------- */
+
+function blockadeOf(sectionId) {
+  return (STATE.blockadesBySection || {})[sectionId] || null;
+}
+
+function renderBlockadePanel() {
+  const box = html('div', {});
+  const all = (STATE.blockades || []).filter((b) => b.status !== 'ended');
+  box.appendChild(html('div', { class: 'section-title' }, `临时封锁（管理员发布，${all.length} 项未结束）`));
+  if (!all.length) {
+    box.appendChild(html('div', { class: 'hint' }, '当前无临时封锁。'));
+    return box;
+  }
+  for (const b of all) {
+    const card = html('div', { class: 'instance-card', id: 'blockade-' + b.id });
+    const head = html('div', { class: 'row' });
+    head.appendChild(html('b', {}, `区段 ${b.sectionId}`));
+    head.appendChild(html('span', { class: 'muted', style: 'flex:1;' }));
+    head.appendChild(html('span', { class: `badge ${b.status === 'active' ? 'red' : 'amber'}` },
+      b.status === 'active' ? '封锁已生效' : '封锁待生效'));
+    card.appendChild(head);
+    card.appendChild(html('div', { class: 'hint', style: 'margin-top:4px;' },
+      `原因：${b.reason}（申请 #${b.id}，${b.applicant}）`));
+    card.appendChild(html('div', { class: 'hint', style: 'margin-top:2px;' },
+      '该区段暂不能参与新的预检/开放/等待兑现；已开放进路不受影响。'));
+    box.appendChild(card);
+  }
+  return box;
 }
 
 function sectionBadge(sec) {
@@ -258,7 +299,13 @@ function renderRouteOps() {
     '途经区段：',
     ...r.steps.flatMap((s, idx) => {
       const sec = STATE.sections.find((x) => x.id === s.section_id);
-      const nodes = [html('b', { style: sec.occ_state !== 'free' ? 'color:var(--red)' : '' }, s.section_id)];
+      const blk = blockadeOf(s.section_id);
+      const nodes = [html('b', { style: sec.occ_state !== 'free' || blk ? 'color:var(--red)' : '' },
+        s.section_id + (blk ? '⊘' : ''))];
+      if (blk) {
+        nodes.push(html('span', { class: `badge ${blk.status === 'active' ? 'red' : 'amber'}`,
+          title: `临时封锁申请 #${blk.id}：${blk.reason}` }, '封锁'));
+      }
       if (idx < r.steps.length - 1) nodes.push(document.createTextNode(' → '));
       return nodes;
     })
@@ -601,7 +648,8 @@ function renderSectionPanel() {
   const sel = html('select', {});
   sel.appendChild(html('option', { value: '' }, '选择区段…'));
   for (const s of STATE.sections) {
-    const o = html('option', { value: s.id }, `${s.id}（${OCC_TEXT[s.occ_state]}）${locks.has(s.id) ? ' [锁闭中]' : ''}`);
+    const o = html('option', { value: s.id },
+      `${s.id}（${OCC_TEXT[s.occ_state]}）${locks.has(s.id) ? ' [锁闭中]' : ''}${blockadeOf(s.id) ? ' [封锁]' : ''}`);
     if (s.id === selectedSection) o.selected = true;
     sel.appendChild(o);
   }
@@ -612,10 +660,18 @@ function renderSectionPanel() {
   if (selectedSection) {
     const sec = STATE.sections.find((s) => s.id === selectedSection);
     const lockedBy = locks.get(sec.id);
+    const blk = blockadeOf(sec.id);
     const info = html('div', { class: 'kv', style: 'margin-top:6px;' },
       '区段 ', html('b', {}, sec.id), ' 当前：', sectionBadge(sec),
-      lockedBy ? html('span', { class: 'badge lock', style: 'margin-left:6px;' }, `进路#${lockedBy}锁闭中`) : null);
+      lockedBy ? html('span', { class: 'badge lock', style: 'margin-left:6px;' }, `进路#${lockedBy}锁闭中`) : null,
+      blk ? html('span', { class: `badge ${blk.status === 'active' ? 'red' : 'amber'}`,
+        style: 'margin-left:6px;', title: `申请 #${blk.id}：${blk.reason}` },
+        blk.status === 'active' ? '封锁中' : '封锁待生效') : null);
     box.appendChild(info);
+    if (blk) {
+      box.appendChild(html('div', { class: 'hint', style: 'margin-top:4px;color:var(--red);' },
+        `临时封锁 #${blk.id}：${blk.reason}（该区段暂不能排新进路）`));
+    }
     if (!lockedBy) {
       const btns = html('div', { class: 'row', style: 'margin-top:6px;' });
       const occBtn = html('button', { class: 'ghost small' }, '置为占用');

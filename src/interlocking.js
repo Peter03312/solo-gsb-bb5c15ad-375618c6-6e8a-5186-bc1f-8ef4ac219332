@@ -67,6 +67,22 @@ function lockingInstance(resourceType, resourceId) {
     .get(resourceType, resourceId);
 }
 
+/** 区段上未结束（待生效/已生效）的临时封锁；无则 undefined */
+function unfinishedBlockade(sectionId) {
+  return getDb()
+    .prepare(
+      `SELECT id, reason, status FROM blockade_applications
+        WHERE section_id=? AND status IN ('pending','active')`
+    )
+    .get(sectionId);
+}
+
+/** 封锁提示语（预检原因与开放拒绝共用同一措辞） */
+function blockadeText(sectionId, b) {
+  return `区段 ${sectionId} 已被临时封锁（申请 #${b.id}，` +
+    `${b.status === 'active' ? '已生效' : '待生效'}，原因：${b.reason}）`;
+}
+
 /* --------------------------- 开放前预检（只读） --------------------------- */
 
 /**
@@ -94,7 +110,7 @@ function checkOpen(routeId, switchPositions = {}) {
 
   if (steps.length === 0) reasons.push(`进路 ${routeId} 未定义任何区段，请先由管理员完善`);
 
-  // 1) 沿途区段：未知/占用、已被其他开放进路锁定 → 阻断
+  // 1) 沿途区段：未知/占用、临时封锁、已被其他开放进路锁定 → 阻断
   const sectionResults = steps.map((s) => {
     const sec = db.prepare(`SELECT id,label,occ_state FROM sections WHERE id=?`).get(s.section_id);
     const problems = [];
@@ -103,6 +119,8 @@ function checkOpen(routeId, switchPositions = {}) {
     } else {
       if (sec.occ_state === 'occupied') problems.push(`区段 ${sec.id} 已被占用`);
       if (sec.occ_state === 'unknown') problems.push(`区段 ${sec.id} 占用状态未知，按占用处理`);
+      const blockade = unfinishedBlockade(s.section_id);
+      if (blockade) problems.push(blockadeText(s.section_id, blockade));
       const holder = lockingInstance('section', s.section_id);
       if (holder) {
         problems.push(`区段 ${s.section_id} 已被已开放进路 #${holder.id}（${holder.route_id}，${holder.opened_by}）锁定`);
@@ -203,6 +221,13 @@ function openRouteInTxn(routeId, switchPositions, clientName) {
       throw new InterlockError(409, 'SECTION_UNKNOWN',
         `不能开放：区段 ${s.section_id} 占用状态未知，按占用处理；请先核实并提交清空`,
         { sectionId: s.section_id });
+    }
+    // 临时封锁（待生效/已生效均阻止新排路；已开放进路不受影响）
+    const blockade = unfinishedBlockade(s.section_id);
+    if (blockade) {
+      throw new InterlockError(409, 'SECTION_BLOCKADED',
+        `不能开放：${blockadeText(s.section_id, blockade)}`,
+        { sectionId: s.section_id, blockadeId: blockade.id });
     }
     const holder = lockingInstance('section', s.section_id);
     if (holder) {
@@ -545,20 +570,28 @@ function getState() {
     routes,
     openInstances,
     recentReleased,
-    // 懒加载避免与 waiting.js / cancellation.js 的循环依赖
+    // 懒加载避免与 waiting.js / cancellation.js / blockade.js 的循环依赖
     waitingApplications: require('./waiting').listApplications(),
     // 延时取消：全部申请（值班台显示取消状态与剩余时间）+ pending 按实例索引 + 保护时长
     cancellationRequests: require('./cancellation').listRequests(),
     pendingCancellations: require('./cancellation').pendingByInstance(),
-    cancelProtectionSeconds: require('./cancellation').getProtectionSeconds()
+    cancelProtectionSeconds: require('./cancellation').getProtectionSeconds(),
+    // 临时封锁：全部申请（管理员/值班台显示）+ 未结束封锁按区段索引
+    blockades: require('./blockade').listBlockades(),
+    blockadesBySection: require('./blockade').unfinishedBySection()
   };
 }
 
 /**
- * 状态变化后触发等待申请兑现扫描。懒加载 waiting.js 以避免循环依赖；
- * 兑现本身不应影响已成功的主操作，扫描异常仅记录日志。
+ * 状态变化后先复核临时封锁（待生效→已生效），再触发等待申请兑现扫描。
+ * 懒加载以避免循环依赖；复核/兑现不应影响已成功的主操作，异常仅记录日志。
  */
 function triggerWaitingSweep(reason) {
+  try {
+    require('./blockade').refreshBlockadeStates(reason);
+  } catch (e) {
+    console.error('[blockade] 封锁状态复核失败:', e);
+  }
   try {
     require('./waiting').sweepFulfillments(reason);
   } catch (e) {

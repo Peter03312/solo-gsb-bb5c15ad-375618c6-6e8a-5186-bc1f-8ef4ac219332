@@ -5,6 +5,7 @@ const { requireAuth } = require('../auth');
 const inter = require('../interlocking');
 const waiting = require('../waiting');
 const cancellation = require('../cancellation');
+const blockade = require('../blockade');
 const { InterlockError } = require('../interlocking');
 
 const router = express.Router();
@@ -102,6 +103,16 @@ router.get('/cancellations', wrap((req, res) => {
     protectionSeconds: cancellation.getProtectionSeconds(),
     me: req.session.name
   });
+}));
+
+/* ------------------------------ 临时封锁（只读） ------------------------------ */
+
+// 查看临时封锁：未结束在前；可选 ?status=pending|active|ended
+// （全量状态 /api/state 的 blockades / blockadesBySection 也一并下发）
+router.get('/blockades', wrap((req, res) => {
+  const status = ['pending', 'active', 'ended'].includes(req.query.status)
+    ? req.query.status : null;
+  res.json({ ok: true, blockades: blockade.listBlockades({ status }) });
 }));
 
 /* ------------------------------ 等待申请 ------------------------------ */

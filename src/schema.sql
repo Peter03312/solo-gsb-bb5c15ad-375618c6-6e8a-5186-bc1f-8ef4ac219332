@@ -183,6 +183,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_cancel_pending_instance
 CREATE INDEX IF NOT EXISTS idx_cancel_status ON cancellation_applications(status, release_at);
 CREATE INDEX IF NOT EXISTS idx_cancel_applicant ON cancellation_applications(applicant);
 
+-- 临时封锁申请（管理员按区段发起）：
+--  - 提交即阻止该区段参与新的进路预检/直接开放/等待兑现（pending 与 active 均阻止）；
+--  - 区段空闲且无进路锁时 pending 自动转 active；占用/未知/仍锁闭时维持 pending；
+--  - 已开放进路的锁闭、走行与延时取消规则不受封锁影响（不强制解除）；
+--  - 管理员可结束 pending/active 封锁；结束后按现有联锁规则重试等待兑现，
+--    不改写区段占用状态；管理员重置推演时清除全部封锁记录。
+-- section_id 不设外键：区段被删除时封锁记录保留（由管理端同事务标记结束）。
+CREATE TABLE IF NOT EXISTS blockade_applications (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  section_id  TEXT NOT NULL,             -- 被封锁的区段编号
+  applicant   TEXT NOT NULL,             -- 发起人（管理员）
+  reason      TEXT NOT NULL,             -- 封锁原因（非空白）
+  -- pending 待生效 / active 已生效 / ended 已结束
+  status      TEXT NOT NULL DEFAULT 'pending'
+              CHECK (status IN ('pending','active','ended')),
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  activated_at TEXT,                     -- 转为已生效的时刻（pending→active）
+  ended_at    TEXT,
+  end_reason  TEXT                       -- 结束说明
+);
+
+-- 同一区段同时至多一笔未结束（待生效/已生效）的封锁申请（重复申请返回原申请）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_blockade_unfinished_section
+  ON blockade_applications(section_id) WHERE status IN ('pending','active');
+CREATE INDEX IF NOT EXISTS idx_blockade_status ON blockade_applications(status, id);
+
 CREATE INDEX IF NOT EXISTS idx_locks_instance ON route_locks(instance_id);
 CREATE INDEX IF NOT EXISTS idx_events_instance ON section_events(instance_id, seq);
 CREATE INDEX IF NOT EXISTS idx_steps_route ON route_steps(route_id, step_order);

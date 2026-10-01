@@ -6,6 +6,7 @@ const { requireAuth } = require('../auth');
 const { getState, triggerWaitingSweep } = require('../interlocking');
 const waiting = require('../waiting');
 const cancellation = require('../cancellation');
+const blockade = require('../blockade');
 
 const router = express.Router();
 router.use(requireAuth('admin'));
@@ -108,8 +109,16 @@ router.delete('/sections/:id', wrap((req, res) => {
     return res.status(409).json({ ok: false,
       error: `区段 ${req.params.id} 仍被进路 ${used.map((u) => u.route_id).join('、')} 引用，请先修改这些进路` });
   }
-  const r = db.prepare(`DELETE FROM sections WHERE id=?`).run(req.params.id);
-  if (r.changes === 0) return res.status(404).json({ ok: false, error: `区段 ${req.params.id} 不存在` });
+  db.transaction(() => {
+    const r = db.prepare(`DELETE FROM sections WHERE id=?`).run(req.params.id);
+    if (r.changes === 0) {
+      const err = new Error(`区段 ${req.params.id} 不存在`);
+      err.status = 404;
+      throw err;
+    }
+    // 区段删除：其未结束封锁同事务标记结束（保留记录与原因）
+    blockade.endBySectionDelete(req.params.id);
+  })();
   res.json({ ok: true });
 }));
 
@@ -348,6 +357,34 @@ router.delete('/routes/:id', wrap((req, res) => {
   res.json({ ok: true });
 }));
 
+/* ------------------------------ 临时封锁 ------------------------------ */
+
+// 发起临时封锁：按区段编号 + 封锁原因；未知区段/空白原因拒绝；
+// 同一区段存在未结束封锁时返回原申请（200，created:false），不产生第二笔
+router.post('/blockades', wrap((req, res) => {
+  const result = blockade.submitBlockade(
+    (req.body || {}).sectionId, (req.body || {}).reason, req.session.name
+  );
+  res.status(result.created ? 201 : 200).json({
+    ok: true,
+    created: result.created,
+    blockade: result.blockade
+  });
+}));
+
+// 封锁列表：未结束在前；可选 ?status=pending|active|ended
+router.get('/blockades', wrap((req, res) => {
+  const status = ['pending', 'active', 'ended'].includes(req.query.status)
+    ? req.query.status : null;
+  res.json({ ok: true, blockades: blockade.listBlockades({ status }) });
+}));
+
+// 结束待生效/已生效封锁；结束后按现有联锁规则重试等待兑现（不改写区段占用状态）
+router.post('/blockades/:id/end', wrap((req, res) => {
+  const b = blockade.endBlockade(Number(req.params.id));
+  res.json({ ok: true, blockade: b });
+}));
+
 /* ------------------------------ 推演状态重置 ------------------------------ */
 
 /**
@@ -364,6 +401,8 @@ router.post('/reset/state', wrap((req, res) => {
     db.prepare(`UPDATE switches SET position='N'`).run();
     // 管理员重置推演：撤销全部等待申请
     waiting.cancelAllByReset('管理员清空推演状态，全部等待申请撤销');
+    // 管理员重置推演：清除全部临时封锁记录
+    blockade.clearAllByReset();
   })();
   res.json({ ok: true, state: getState() });
 }));
@@ -381,6 +420,8 @@ router.post('/reset/training', wrap((req, res) => {
     db.prepare(`UPDATE switches SET position='N'`).run();
     // 管理员重置推演：撤销全部等待申请
     waiting.cancelAllByReset('管理员恢复示例初始状态（培训重开），全部等待申请撤销');
+    // 管理员重置推演：清除全部临时封锁记录
+    blockade.clearAllByReset();
   })();
   res.json({ ok: true, state: getState() });
 }));

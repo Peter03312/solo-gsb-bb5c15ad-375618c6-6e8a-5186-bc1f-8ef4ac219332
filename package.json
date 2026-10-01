@@ -10,7 +10,8 @@
     "smoke": "node test/smoke.cjs",
     "test:waiting": "node test/waiting-http.cjs",
     "test:cancel": "node test/cancellation-http.cjs",
-    "test": "npm run smoke && npm run test:waiting && npm run test:cancel"
+    "test:blockade": "node test/blockade-http.cjs",
+    "test": "npm run smoke && npm run test:waiting && npm run test:cancel && npm run test:blockade"
   },
   "engines": {
     "node": ">=18"

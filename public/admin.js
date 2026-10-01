@@ -66,6 +66,15 @@ function renderYard() {
     svg.appendChild(el('text', {
       x: (sec.x1 + sec.x2) / 2, y: (sec.y1 + sec.y2) / 2 - 14, class: 'tag-label'
     }, sec.id));
+    // 临时封锁标记
+    const blk = (STATE.blockadesBySection || {})[sec.id];
+    if (blk) {
+      const t = el('text', {
+        x: (sec.x1 + sec.x2) / 2, y: (sec.y1 + sec.y2) / 2 + 16, class: 'blk-tag'
+      }, blk.status === 'active' ? '⊘封锁中' : '⊘封锁待生效');
+      t.appendChild(el('title', {}, `临时封锁申请 #${blk.id}：${blk.reason}`));
+      svg.appendChild(t);
+    }
   }
 
   // 道岔
@@ -484,8 +493,11 @@ function renderSide() {
   side.appendChild(html('div', { class: 'section-title' }, `区段（${STATE.sections.length}）`));
   const secList = html('div', { class: 'entity-list' });
   for (const s of STATE.sections) {
+    const blk = (STATE.blockadesBySection || {})[s.id];
     secList.appendChild(html('div', { class: 'ent' },
       html('b', { class: 'grow' }, `${s.id} ${s.label !== s.id ? s.label : ''}`),
+      blk ? html('span', { class: `badge ${blk.status === 'active' ? 'red' : 'amber'}` },
+        blk.status === 'active' ? '封锁中' : '封锁待生效') : null,
       html('span', { class: `badge ${s.occ_state === 'free' ? 'green' : s.occ_state === 'occupied' ? 'red' : 'unknown'}` },
         OCC_TEXT[s.occ_state])));
   }
@@ -528,6 +540,9 @@ function renderSide() {
   if (STATE.routes.length === 0) rtList.appendChild(html('div', { class: 'hint' }, '尚无进路'));
   side.appendChild(rtList);
 
+  // 临时封锁
+  side.appendChild(renderBlockadePanel());
+
   // 推演管理
   side.appendChild(html('div', { class: 'section-title' }, '推演管理'));
 
@@ -558,10 +573,10 @@ function renderSide() {
   const mgmt = html('div', {});
   const b1 = html('button', { class: 'ghost' }, '清空推演状态（区段→未知，道岔→N）');
   const b2 = html('button', { class: 'ghost' }, '培训重开（区段→空闲，道岔→N）');
-  b1.addEventListener('click', resetState('/api/admin/reset/state',
-    '将删除全部进路实例与事件，区段恢复"未知"，确定？'));
-  b2.addEventListener('click', resetState('/api/admin/reset/training',
-    '将删除全部进路实例与事件，区段全部置为空闲，确定重新开始一轮演练？'));
+  b1.addEventListener('click', () => resetState('/api/admin/reset/state',
+    '将删除全部进路实例与事件、撤销等待与延时取消申请、清除临时封锁记录，区段恢复"未知"，确定？'));
+  b2.addEventListener('click', () => resetState('/api/admin/reset/training',
+    '将删除全部进路实例与事件、撤销等待与延时取消申请、清除临时封锁记录，区段全部置为空闲，确定重新开始一轮演练？'));
   mgmt.appendChild(html('div', { class: 'row' }, b1));
   mgmt.appendChild(html('div', { class: 'row', style: 'margin-top:8px;' }, b2));
   side.appendChild(mgmt);
@@ -574,6 +589,93 @@ async function resetState(url, msg) {
     toast('推演状态已重置', 'ok');
     await load(true);
   } catch (e) { toast(e.message, 'err', 6000); }
+}
+
+/* ============================== 临时封锁 ============================== */
+
+const BLOCKADE_STATUS = {
+  pending: ['amber', '待生效'],
+  active: ['red', '已生效'],
+  ended: ['unknown', '已结束']
+};
+
+function renderBlockadePanel() {
+  const box = html('div', {});
+  const all = STATE.blockades || [];
+  const unfinished = all.filter((b) => b.status !== 'ended');
+  box.appendChild(html('div', { class: 'section-title' }, `临时封锁（${unfinished.length} 未结束）`));
+
+  // 发表单：区段 + 原因
+  const form = html('div', { class: 'row' });
+  const secSel = html('select', { style: 'width:96px;' });
+  for (const s of STATE.sections) {
+    const blk = (STATE.blockadesBySection || {})[s.id];
+    secSel.appendChild(html('option', { value: s.id }, `${s.id}${blk ? '（已封锁）' : ''}`));
+  }
+  const reasonIn = html('input', { type: 'text', placeholder: '封锁原因（必填）',
+    style: 'flex:1;min-width:120px;' });
+  const submitBtn = html('button', { class: 'primary small' }, '发起封锁');
+  submitBtn.addEventListener('click', async () => {
+    try {
+      const data = await api('/api/admin/blockades', {
+        method: 'POST',
+        body: JSON.stringify({ sectionId: secSel.value, reason: reasonIn.value })
+      });
+      const b = data.blockade;
+      toast(data.created
+        ? `封锁申请 #${b.id} 已提交（${b.status === 'active' ? '已生效' : '待生效'}）：` +
+          `区段 ${b.sectionId} 立即禁止排新进路`
+        : `区段 ${b.sectionId} 已有未结束封锁申请 #${b.id}，返回原申请`,
+        data.created ? 'ok' : 'info', 5200);
+      reasonIn.value = '';
+      await load(true);
+    } catch (e) { toast(e.message, 'err', 6000); }
+  });
+  form.appendChild(secSel);
+  form.appendChild(reasonIn);
+  form.appendChild(submitBtn);
+  box.appendChild(form);
+  box.appendChild(html('div', { class: 'hint', style: 'margin-top:6px;' },
+    '提交后立即阻止该区段参与新的预检/开放/等待兑现；已开放进路不受影响。' +
+    '区段空闲且无进路锁时自动转为"已生效"，否则保持"待生效"并持续复核。'));
+
+  if (!all.length) {
+    box.appendChild(html('div', { class: 'hint', style: 'margin-top:6px;' }, '暂无封锁记录'));
+    return box;
+  }
+  for (const b of all.slice(0, 12)) {
+    const [cls, txt] = BLOCKADE_STATUS[b.status] || ['unknown', b.status];
+    const card = html('div', { class: 'instance-card', id: 'blockade-' + b.id,
+      style: 'margin-top:8px;' });
+    const head = html('div', { class: 'row' });
+    head.appendChild(html('b', {}, `封锁#${b.id}`));
+    head.appendChild(html('span', { class: 'muted' }, `区段 ${b.sectionId}`));
+    head.appendChild(html('span', { class: 'muted', style: 'flex:1;' }));
+    head.appendChild(html('span', { class: `badge ${cls}` }, txt));
+    card.appendChild(head);
+    card.appendChild(html('div', { class: 'hint', style: 'margin-top:4px;' },
+      `原因：${b.reason}（${b.applicant}，${b.createdAt}）`));
+    if (b.status === 'ended' && b.endReason) {
+      card.appendChild(html('div', { class: 'hint', style: 'margin-top:2px;' }, b.endReason));
+    }
+    if (b.status !== 'ended') {
+      const row = html('div', { class: 'row', style: 'margin-top:6px;' });
+      const endBtn = html('button', { class: 'danger small' }, '结束封锁');
+      endBtn.addEventListener('click', async () => {
+        if (!confirm(`结束封锁申请 #${b.id}（区段 ${b.sectionId}）？\n` +
+          '结束后将按现有联锁规则重试等待兑现，区段占用状态保持不变。')) return;
+        try {
+          await api(`/api/admin/blockades/${b.id}/end`, { method: 'POST' });
+          toast(`封锁申请 #${b.id} 已结束`, 'ok');
+          await load(true);
+        } catch (e) { toast(e.message, 'err', 6000); }
+      });
+      row.appendChild(endBtn);
+      card.appendChild(row);
+    }
+    box.appendChild(card);
+  }
+  return box;
 }
 
 /* ============================== 进路构建器 ============================== */
