@@ -183,6 +183,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_cancel_pending_instance
 CREATE INDEX IF NOT EXISTS idx_cancel_status ON cancellation_applications(status, release_at);
 CREATE INDEX IF NOT EXISTS idx_cancel_applicant ON cancellation_applications(applicant);
 
+-- 临时封锁：管理员按"区段编号 + 封锁原因"发起。
+--  - pending 待生效：申请时区段被占用/未知或仍被已开放进路锁闭；不强制解除任何既有
+--    进路，待区段空闲且无进路锁时由复核扫描自动转为 effective；
+--  - effective 已生效：立即阻止该区段参与新的进路预检、直接开放与等待兑现；
+--    等待申请保留顺位，阻断原因中显示封锁原因。
+--  - ended 已结束：管理员可结束待生效或已生效封锁；结束后按既有联锁规则重试等待
+--    兑现，不改写区段占用状态。
+-- 已开放进路保持原有锁闭、走行与延时取消规则，不因封锁申请被强制解除。
+-- section_id 外键级联：管理员删除区段时封锁记录一并删除（删除接口另会拒绝在有
+-- 未结束封锁时删除区段，级联仅作兜底）。
+CREATE TABLE IF NOT EXISTS section_blockades (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  section_id  TEXT NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
+  reason      TEXT NOT NULL,            -- 封锁原因（非空，提交时校验）
+  applicant   TEXT NOT NULL,            -- 发起人（管理员）
+  -- pending 待生效 / effective 已生效 / ended 已结束
+  status      TEXT NOT NULL DEFAULT 'pending'
+              CHECK (status IN ('pending','effective','ended')),
+  -- 待生效期间最近一次复核的未生效原因（占用/未知/进路锁闭）
+  pending_reason TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  effective_at TEXT,
+  ended_at    TEXT,
+  end_reason  TEXT
+);
+
+-- 同一区段同时至多一笔未结束（待生效/已生效）的封锁：重复申请返回原申请
+CREATE UNIQUE INDEX IF NOT EXISTS idx_blockade_active_section
+  ON section_blockades(section_id) WHERE status IN ('pending','effective');
+CREATE INDEX IF NOT EXISTS idx_blockade_status ON section_blockades(status, id);
+
 CREATE INDEX IF NOT EXISTS idx_locks_instance ON route_locks(instance_id);
 CREATE INDEX IF NOT EXISTS idx_events_instance ON section_events(instance_id, seq);
 CREATE INDEX IF NOT EXISTS idx_steps_route ON route_steps(route_id, step_order);

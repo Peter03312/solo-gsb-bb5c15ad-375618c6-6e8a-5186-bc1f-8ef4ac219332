@@ -11,6 +11,12 @@ const svg = document.getElementById('yard');
 const side = document.getElementById('side');
 const { el, html, api, toast, OCC_TEXT } = App;
 
+/** 区段当前未结束（待生效/已生效）封锁，无则 null */
+function blockadeOf(sectionId) {
+  const all = (STATE && STATE.activeBlockades) || {};
+  return all[String(sectionId)] || all[sectionId] || null;
+}
+
 async function boot() {
   document.getElementById('meName').textContent = '管理员';
   document.getElementById('logoutBtn').addEventListener('click', logout);
@@ -56,16 +62,31 @@ function renderYard() {
 
   // 区段
   for (const sec of STATE.sections) {
+    const bd = blockadeOf(sec.id);
     const line = el('line', {
       x1: sec.x1, y1: sec.y1, x2: sec.x2, y2: sec.y2,
-      class: `sec-line state-${sec.occ_state}`,
+      class: `sec-line state-${sec.occ_state}` +
+        (bd && bd.status === 'effective' ? ' blocked-effective' : '') +
+        (bd && bd.status === 'pending' ? ' blocked-pending' : ''),
       'data-id': sec.id
     });
     line.addEventListener('click', (ev) => { ev.stopPropagation(); onEntityClick('section', sec.id); });
+    if (bd) {
+      line.appendChild(el('title', {},
+        `区段 ${sec.id} 临时封锁 #${bd.id}（${bd.status === 'pending' ? '待生效' : '已生效'}）：${bd.reason}`));
+    }
     svg.appendChild(line);
     svg.appendChild(el('text', {
       x: (sec.x1 + sec.x2) / 2, y: (sec.y1 + sec.y2) / 2 - 14, class: 'tag-label'
     }, sec.id));
+    if (bd) {
+      const mx = (sec.x1 + sec.x2) / 2, my = (sec.y1 + sec.y2) / 2 + 16;
+      svg.appendChild(el('text', {
+        x: mx, y: my,
+        class: `tag-blockade ${bd.status === 'effective' ? 'effective' : 'pending'}`,
+        'text-anchor': 'middle'
+      }, bd.status === 'effective' ? `⛔封#${bd.id}` : `🚧待#${bd.id}`));
+    }
   }
 
   // 道岔
@@ -484,8 +505,13 @@ function renderSide() {
   side.appendChild(html('div', { class: 'section-title' }, `区段（${STATE.sections.length}）`));
   const secList = html('div', { class: 'entity-list' });
   for (const s of STATE.sections) {
+    const bd = blockadeOf(s.id);
     secList.appendChild(html('div', { class: 'ent' },
       html('b', { class: 'grow' }, `${s.id} ${s.label !== s.id ? s.label : ''}`),
+      bd ? html('span', {
+        class: `badge ${bd.status === 'effective' ? 'red' : 'amber'}`,
+        title: `封锁#${bd.id}：${bd.reason}`
+      }, bd.status === 'effective' ? `⛔封锁#${bd.id}` : `🚧待生效#${bd.id}`) : null,
       html('span', { class: `badge ${s.occ_state === 'free' ? 'green' : s.occ_state === 'occupied' ? 'red' : 'unknown'}` },
         OCC_TEXT[s.occ_state])));
   }
@@ -528,6 +554,9 @@ function renderSide() {
   if (STATE.routes.length === 0) rtList.appendChild(html('div', { class: 'hint' }, '尚无进路'));
   side.appendChild(rtList);
 
+  // 临时封锁管理
+  side.appendChild(renderBlockadeAdmin());
+
   // 推演管理
   side.appendChild(html('div', { class: 'section-title' }, '推演管理'));
 
@@ -559,12 +588,116 @@ function renderSide() {
   const b1 = html('button', { class: 'ghost' }, '清空推演状态（区段→未知，道岔→N）');
   const b2 = html('button', { class: 'ghost' }, '培训重开（区段→空闲，道岔→N）');
   b1.addEventListener('click', resetState('/api/admin/reset/state',
-    '将删除全部进路实例与事件，区段恢复"未知"，确定？'));
+    '将删除全部进路实例与事件、清除封锁记录，区段恢复"未知"，确定？'));
   b2.addEventListener('click', resetState('/api/admin/reset/training',
-    '将删除全部进路实例与事件，区段全部置为空闲，确定重新开始一轮演练？'));
+    '将删除全部进路实例与事件、清除封锁记录，区段全部置为空闲，确定重新开始一轮演练？'));
   mgmt.appendChild(html('div', { class: 'row' }, b1));
   mgmt.appendChild(html('div', { class: 'row', style: 'margin-top:8px;' }, b2));
   side.appendChild(mgmt);
+}
+
+/* ============================== 临时封锁管理 ============================== */
+
+function renderBlockadeAdmin() {
+  const box = html('div', {});
+  box.appendChild(html('div', { class: 'section-title' }, '临时封锁（按区段编号 + 封锁原因）'));
+
+  const row = html('div', { class: 'row' });
+  const secSel = html('select', { style: 'max-width:130px;' });
+  secSel.appendChild(html('option', { value: '' }, '选择区段…'));
+  for (const s of STATE.sections) {
+    const bd = blockadeOf(s.id);
+    secSel.appendChild(html('option', { value: s.id },
+      `${s.id}${bd ? (bd.status === 'effective' ? '（⛔封锁中）' : '（🚧待生效）') : ''}`));
+  }
+  const reasonIn = html('input', {
+    type: 'text', maxlength: '200', placeholder: '封锁原因（必填，如：线路检修）',
+    style: 'flex:1;min-width:160px;'
+  });
+  const applyBtn = html('button', { class: 'primary small' }, '发起封锁');
+  row.appendChild(secSel);
+  row.appendChild(reasonIn);
+  row.appendChild(applyBtn);
+  box.appendChild(row);
+
+  async function submitBlockade() {
+    const sid = secSel.value;
+    const reason = reasonIn.value.trim();
+    if (!sid) return toast('请选择要封锁的区段', 'err');
+    if (!reason) return toast('封锁原因不能为空', 'err');
+    try {
+      const data = await api(`/api/admin/sections/${encodeURIComponent(sid)}/blockade`, {
+        method: 'POST', body: JSON.stringify({ reason })
+      });
+      if (!data.created) {
+        toast(`区段 ${sid} 已有未结束封锁 #${data.blockade.id}（${data.blockade.status === 'pending' ? '待生效' : '已生效'}），返回原申请`, 'info', 5200);
+      } else {
+        toast(data.blockade.status === 'effective'
+          ? `封锁 #${data.blockade.id} 已生效：区段 ${sid} 停止参与新排路`
+          : `封锁 #${data.blockade.id} 已受理（待生效）：区段 ${sid} 已停止新排路，出清解锁后自动生效`, 'ok', 6000);
+      }
+      await load(true);
+    } catch (e) { toast(e.message, 'err', 6000); }
+  }
+  applyBtn.addEventListener('click', submitBlockade);
+  reasonIn.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') submitBlockade(); });
+
+  box.appendChild(html('div', { class: 'hint', style: 'margin-top:6px;' },
+    '提交后该区段立即停止参与新的进路预检、直接开放与等待兑现（等待申请保留顺位并显示封锁原因）；' +
+    '已开放进路不强制解除，按原锁闭/走行/延时取消规则继续，区段空闲且无进路锁时待生效自动转已生效。'));
+
+  const list = STATE.blockades || [];
+  const active = list.filter((b) => b.status === 'pending' || b.status === 'effective');
+  if (active.length) {
+    const ul = html('div', { style: 'margin-top:8px;' });
+    active.forEach((b) => {
+      const card = html('div', { class: 'instance-card', id: 'bd-' + b.id });
+      const head = html('div', { class: 'row' });
+      head.appendChild(html('b', {}, `封锁#${b.id}`));
+      head.appendChild(html('span', { class: 'muted' }, `区段 ${b.sectionId}`));
+      head.appendChild(html('span', { class: 'muted', style: 'flex:1;' }));
+      head.appendChild(html('span', { class: `badge ${b.status === 'effective' ? 'red' : 'amber'}` },
+        b.status === 'effective' ? '⛔ 已生效' : '🚧 待生效'));
+      const endBtn = html('button', { class: 'danger small' }, '结束封锁');
+      endBtn.addEventListener('click', () => endBlockade(b));
+      head.appendChild(endBtn);
+      card.appendChild(head);
+      card.appendChild(html('div', { class: 'hint', style: 'margin-top:4px;' },
+        '原因：', html('b', { style: 'color:var(--red);' }, b.reason),
+        `　发起人：${b.applicant}　${String(b.createdAt || '').replace('T', ' ').slice(0, 19)}`));
+      if (b.status === 'pending') {
+        const blockers = (b.resourceCheck && b.resourceCheck.blockers) ||
+          (b.pendingReason ? [b.pendingReason] : []);
+        blockers.forEach((t) => card.appendChild(html('div', {
+          class: 'hint', style: 'margin-top:2px;color:var(--amber);'
+        }, '待生效：' + t)));
+      }
+      ul.appendChild(card);
+    });
+    box.appendChild(ul);
+  } else {
+    box.appendChild(html('div', { class: 'hint', style: 'margin-top:6px;' }, '当前无未结束封锁。'));
+  }
+
+  // 最近已结束（最多 5 条，便于管理员核对）
+  const ended = list.filter((b) => b.status === 'ended').slice(0, 5);
+  if (ended.length) {
+    box.appendChild(html('div', { class: 'hint', style: 'margin-top:6px;' },
+      '最近结束：' + ended.map((b) =>
+        `#${b.id}(区段${b.sectionId} ${String(b.endedAt || '').replace('T', ' ').slice(5, 16)})`).join('；')));
+  }
+  return box;
+}
+
+async function endBlockade(b) {
+  if (!confirm(`结束区段 ${b.sectionId} 的封锁 #${b.id}（${b.status === 'pending' ? '待生效' : '已生效'}）？\n` +
+    '结束后系统将按现有联锁规则重试等待兑现，区段占用状态不变。')) return;
+  try {
+    const data = await api(`/api/admin/blockades/${b.id}/end`, { method: 'POST', body: {} });
+    if (!data.ended) toast(`封锁 #${b.id} 已处于结束状态`, 'info');
+    else toast(`封锁 #${b.id} 已结束，已重试等待兑现`, 'ok', 5000);
+    await load(true);
+  } catch (e) { toast(e.message, 'err', 6000); }
 }
 
 async function resetState(url, msg) {

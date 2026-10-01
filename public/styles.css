@@ -170,6 +170,32 @@ select, input[type=text], input[type=password], input[type=number] {
 .sec-line.state-unknown { stroke: var(--unknown); stroke-dasharray: 9 6; }
 .sec-line.locked { filter: drop-shadow(0 0 3px rgba(122, 61, 240, .7)); stroke: var(--lock); }
 .sec-line.route-hi { stroke: var(--brand); }
+/* 临时封锁：红纹=已生效（立即阻止新排路），橙纹=待生效（既有进路继续走行） */
+.sec-line.blocked-effective {
+  stroke: var(--red);
+  stroke-dasharray: 2.5 5;
+  stroke-width: 8;
+  filter: drop-shadow(0 0 3px rgba(214, 69, 69, .65));
+  animation: blockade-blink 1.6s steps(2, start) infinite;
+}
+.sec-line.blocked-pending {
+  stroke: var(--amber);
+  stroke-dasharray: 2.5 5;
+  stroke-width: 8;
+  filter: drop-shadow(0 0 3px rgba(199, 123, 24, .6));
+}
+@keyframes blockade-blink { 50% { opacity: .45; } }
+.tag-blockade {
+  font-size: 10px;
+  paint-order: stroke;
+  stroke: #fbfcfe;
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  pointer-events: none;
+  font-weight: 700;
+}
+.tag-blockade.effective { fill: var(--red); }
+.tag-blockade.pending { fill: var(--amber); }
 
 .sw-line { stroke: #8a94a6; stroke-width: 4; fill: none; }
 .sw-line.active { stroke: var(--brand); stroke-width: 5; }

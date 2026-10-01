@@ -74,6 +74,12 @@ function pendingCancellationOf(instanceId) {
   return all[String(instanceId)] || all[instanceId] || null;
 }
 
+/** 区段当前未结束（待生效/已生效）封锁，无则 null */
+function blockadeOf(sectionId) {
+  const all = STATE.activeBlockades || {};
+  return all[String(sectionId)] || all[sectionId] || null;
+}
+
 /* ------------------------------ 站场图渲染 ------------------------------ */
 
 function lockedSectionSet() {
@@ -136,14 +142,23 @@ function renderYard() {
   // 区段
   for (const sec of STATE.sections) {
     const lockedBy = locks.get(sec.id);
+    const bd = blockadeOf(sec.id);
     const cls = [
       'sec-line',
       `state-${sec.occ_state}`,
       lockedBy ? 'locked' : '',
-      !lockedBy && hiSections.has(sec.id) ? 'route-hi' : ''
+      bd && bd.status === 'effective' ? 'blocked-effective' : '',
+      bd && bd.status === 'pending' ? 'blocked-pending' : '',
+      !lockedBy && !bd && hiSections.has(sec.id) ? 'route-hi' : ''
     ].filter(Boolean).join(' ');
     const line = el('line', { x1: sec.x1, y1: sec.y1, x2: sec.x2, y2: sec.y2, class: cls });
     line.addEventListener('click', () => { selectedSection = sec.id; renderSide(); });
+    if (bd) {
+      const tip = el('title', {},
+        `区段 ${sec.id} 临时封锁 #${bd.id}（${bd.status === 'pending' ? '待生效' : '已生效'}）：${bd.reason}` +
+        (bd.pendingReason ? `\n待生效原因：${bd.pendingReason}` : ''));
+      line.appendChild(tip);
+    }
     svg.appendChild(line);
 
     const mx = (sec.x1 + sec.x2) / 2;
@@ -151,6 +166,19 @@ function renderYard() {
     const tag = el('text', { x: mx, y: my, class: 'tag-label' }, `${sec.id}`);
     tag.addEventListener('click', () => { selectedSection = sec.id; renderSide(); });
     svg.appendChild(tag);
+
+    // 封锁标记：⛔ 已生效 / 🚧 待生效（值班台显示封锁状态与原因）
+    if (bd) {
+      const mark = el('text', {
+        x: mx, y: my + 15, class: `tag-blockade ${bd.status === 'effective' ? 'effective' : 'pending'}`,
+        'text-anchor': 'middle'
+      }, bd.status === 'effective' ? '⛔封' : '🚧待');
+      const markTip = el('title', {},
+        `临时封锁 #${bd.id}（${bd.status === 'pending' ? '待生效' : '已生效'}）：${bd.reason}`);
+      mark.appendChild(markTip);
+      mark.addEventListener('click', () => { selectedSection = sec.id; renderSide(); });
+      svg.appendChild(mark);
+    }
   }
 
   // 道岔核心
@@ -218,6 +246,7 @@ function renderSide() {
   }
   side.appendChild(renderWaitingPanel());
   side.appendChild(renderCancellationPanel());
+  side.appendChild(renderBlockadePanel());
   side.appendChild(renderSwitchPanel());
   side.appendChild(renderSectionPanel());
   side.appendChild(renderInstances());
@@ -258,7 +287,17 @@ function renderRouteOps() {
     '途经区段：',
     ...r.steps.flatMap((s, idx) => {
       const sec = STATE.sections.find((x) => x.id === s.section_id);
-      const nodes = [html('b', { style: sec.occ_state !== 'free' ? 'color:var(--red)' : '' }, s.section_id)];
+      const bd = blockadeOf(s.section_id);
+      const nodes = [html('b', {
+        style: sec.occ_state !== 'free' || bd ? 'color:var(--red)' : ''
+      }, s.sectionId)];
+      if (bd) {
+        nodes.push(html('span', {
+          class: `badge ${bd.status === 'effective' ? 'red' : 'amber'}`,
+          style: 'margin-left:4px;',
+          title: `临时封锁 #${bd.id}：${bd.reason}`
+        }, bd.status === 'effective' ? '⛔封锁' : '🚧待生效'));
+      }
       if (idx < r.steps.length - 1) nodes.push(document.createTextNode(' → '));
       return nodes;
     })
@@ -539,6 +578,50 @@ function renderCancellationCard(c) {
   return card;
 }
 
+/* ------------------------------- 临时封锁 ------------------------------- */
+
+function renderBlockadePanel() {
+  const box = html('div', {});
+  box.appendChild(html('div', { class: 'section-title' }, '临时封锁（管理员发起）'));
+  const list = STATE.blockades || [];
+  const active = list.filter((b) => b.status === 'pending' || b.status === 'effective');
+  if (!active.length) {
+    box.appendChild(html('div', { class: 'hint' }, '当前无未结束的区段封锁。'));
+    return box;
+  }
+  active.forEach((b) => {
+    const card = html('div', { class: 'instance-card' });
+    const head = html('div', { class: 'row' });
+    head.appendChild(html('b', {}, `封锁#${b.id}`));
+    head.appendChild(html('span', { class: 'muted' }, `区段 ${b.sectionId}`));
+    head.appendChild(html('span', { class: 'muted', style: 'flex:1;' }));
+    head.appendChild(html('span', { class: `badge ${b.status === 'effective' ? 'red' : 'amber'}` },
+      b.status === 'effective' ? '⛔ 已生效' : '🚧 待生效'));
+    card.appendChild(head);
+    card.appendChild(html('div', { class: 'hint', style: 'margin-top:4px;' },
+      '封锁原因：', html('b', { style: 'color:var(--red);' }, b.reason)));
+    card.appendChild(html('div', { class: 'hint' },
+      `发起人：${b.applicant}｜申请于 ${String(b.createdAt || '').replace('T', ' ').slice(0, 19)}` +
+      (b.effectiveAt ? `｜生效于 ${String(b.effectiveAt).replace('T', ' ').slice(0, 19)}` : '')));
+    if (b.status === 'pending') {
+      const ul = html('ul', { class: 'reasons', style: 'margin-top:6px;' });
+      const blockers = (b.resourceCheck && b.resourceCheck.blockers) ||
+        (b.pendingReason ? [b.pendingReason] : []);
+      (blockers.length ? blockers : ['等待资源复核…']).forEach((t) =>
+        ul.appendChild(html('li', {
+          style: 'background:#fdf4e3;border-color:#ecd2a5;color:#8a520a;'
+        }, t)));
+      card.appendChild(ul);
+    }
+    card.appendChild(html('div', { class: 'hint', style: 'margin-top:4px;' },
+      b.status === 'effective'
+        ? '该区段已停止参与新的进路预检、直接开放与等待兑现；等待申请保留顺位。'
+        : '该区段已停止参与新的排路；已开放进路保持原锁闭与走行规则，出清后封锁自动生效。'));
+    box.appendChild(card);
+  });
+  return box;
+}
+
 /* ------------------------------- 道岔操作 ------------------------------- */
 
 function focusSwitch(switchId) {
@@ -601,7 +684,10 @@ function renderSectionPanel() {
   const sel = html('select', {});
   sel.appendChild(html('option', { value: '' }, '选择区段…'));
   for (const s of STATE.sections) {
-    const o = html('option', { value: s.id }, `${s.id}（${OCC_TEXT[s.occ_state]}）${locks.has(s.id) ? ' [锁闭中]' : ''}`);
+    const bd = blockadeOf(s.id);
+    const o = html('option', { value: s.id },
+      `${s.id}（${OCC_TEXT[s.occ_state]}）${locks.has(s.id) ? ' [锁闭中]' : ''}` +
+      `${bd ? (bd.status === 'effective' ? ' [⛔封锁]' : ' [🚧待生效]') : ''}`);
     if (s.id === selectedSection) o.selected = true;
     sel.appendChild(o);
   }
@@ -612,10 +698,19 @@ function renderSectionPanel() {
   if (selectedSection) {
     const sec = STATE.sections.find((s) => s.id === selectedSection);
     const lockedBy = locks.get(sec.id);
+    const bd = blockadeOf(selectedSection);
     const info = html('div', { class: 'kv', style: 'margin-top:6px;' },
       '区段 ', html('b', {}, sec.id), ' 当前：', sectionBadge(sec),
-      lockedBy ? html('span', { class: 'badge lock', style: 'margin-left:6px;' }, `进路#${lockedBy}锁闭中`) : null);
+      lockedBy ? html('span', { class: 'badge lock', style: 'margin-left:6px;' }, `进路#${lockedBy}锁闭中`) : null,
+      bd ? html('span', {
+        class: `badge ${bd.status === 'effective' ? 'red' : 'amber'}`, style: 'margin-left:6px;',
+        title: bd.reason
+      }, bd.status === 'effective' ? `⛔ 封锁#${bd.id} 已生效` : `🚧 封锁#${bd.id} 待生效`) : null);
     box.appendChild(info);
+    if (bd) {
+      box.appendChild(html('div', { class: 'hint', style: 'margin-top:4px;color:var(--red);' },
+        `封锁原因：${bd.reason}` + (bd.pendingReason ? `；待生效原因：${bd.pendingReason}` : '')));
+    }
     if (!lockedBy) {
       const btns = html('div', { class: 'row', style: 'margin-top:6px;' });
       const occBtn = html('button', { class: 'ghost small' }, '置为占用');
@@ -701,12 +796,18 @@ function renderInstanceCard(inst) {
   inst.sections.forEach((s) => {
     const sec = STATE.sections.find((x) => x.id === s.section_id);
     const locked = inst.lockedSections.includes(s.section_id);
+    const bd = blockadeOf(s.section_id);
     const tr = html('tr', {});
     tr.appendChild(html('td', {}, String(s.step_order)));
     tr.appendChild(html('td', {}, s.section_id));
     tr.appendChild(html('td', {}, html('span', { class: `badge ${locked ? 'lock' : ''}` },
       locked ? '锁闭' : '已解锁')));
-    tr.appendChild(html('td', {}, sec ? sectionBadge(sec) : '?'));
+    tr.appendChild(html('td', {},
+      sec ? sectionBadge(sec) : '?',
+      bd ? html('span', {
+        class: `badge ${bd.status === 'effective' ? 'red' : 'amber'}`,
+        style: 'margin-left:4px;', title: `封锁#${bd.id}：${bd.reason}`
+      }, bd.status === 'effective' ? '⛔封' : '🚧待') : null));
     tbl.appendChild(tr);
   });
   card.appendChild(tbl);

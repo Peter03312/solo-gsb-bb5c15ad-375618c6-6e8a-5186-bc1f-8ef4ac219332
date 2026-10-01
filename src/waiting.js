@@ -287,11 +287,22 @@ function sweepFulfillments(reason) {
         const overlap = keys.all
           .filter((k) => blockers.includes(blockedResources.get(k)))
           .map((k) => `${kindOf(k)} ${k.split(':')[1]}`);
+        const reasonTexts = [
+          `前项等待申请 #${blockers.join('、#')} 尚未兑现，共享 ${[...new Set(overlap)].join('、')}，按提交顺序不得越过`
+        ];
+        // 共享区段正被临时封锁时，同时显示封锁原因（申请保留顺位，不因封锁失效）
+        const bdSet = new Set();
+        for (const key of keys.all) {
+          if (!key.startsWith('section:')) continue;
+          const bd = require('./blockade').activeBlockadeInTxn(key.split(':')[1]);
+          if (bd && !bdSet.has(bd.id)) {
+            bdSet.add(bd.id);
+            reasonTexts.push(`区段 ${key.split(':')[1]} 已被临时封锁（封锁#${bd.id}，${bd.status === 'pending' ? '待生效' : '已生效'}）：${bd.reason}`);
+          }
+        }
         db.prepare(
           `UPDATE waiting_applications SET block_reasons=?, blocked_by=? WHERE id=?`
-        ).run(JSON.stringify([
-          `前项等待申请 #${blockers.join('、#')} 尚未兑现，共享 ${[...new Set(overlap)].join('、')}，按提交顺序不得越过`
-        ]), blockers.join(','), app.id);
+        ).run(JSON.stringify(reasonTexts), blockers.join(','), app.id);
         for (const k of keys.all) if (!blockedResources.has(k)) blockedResources.set(k, app.id);
         continue;
       }

@@ -103,6 +103,11 @@ function checkOpen(routeId, switchPositions = {}) {
     } else {
       if (sec.occ_state === 'occupied') problems.push(`区段 ${sec.id} 已被占用`);
       if (sec.occ_state === 'unknown') problems.push(`区段 ${sec.id} 占用状态未知，按占用处理`);
+      // 临时封锁（待生效/已生效同样阻止新的排路），并显示封锁原因
+      const bd = require('./blockade').activeBlockadeInTxn(s.section_id);
+      if (bd) {
+        problems.push(`区段 ${sec.id} 已被临时封锁（封锁#${bd.id}，${bd.status === 'pending' ? '待生效' : '已生效'}）：${bd.reason}`);
+      }
       const holder = lockingInstance('section', s.section_id);
       if (holder) {
         problems.push(`区段 ${s.section_id} 已被已开放进路 #${holder.id}（${holder.route_id}，${holder.opened_by}）锁定`);
@@ -203,6 +208,13 @@ function openRouteInTxn(routeId, switchPositions, clientName) {
       throw new InterlockError(409, 'SECTION_UNKNOWN',
         `不能开放：区段 ${s.section_id} 占用状态未知，按占用处理；请先核实并提交清空`,
         { sectionId: s.section_id });
+    }
+    // 临时封锁：待生效/已生效均阻止新的开放与等待兑现（封锁原因一并返回）
+    const bd = require('./blockade').activeBlockadeInTxn(s.section_id);
+    if (bd) {
+      throw new InterlockError(409, 'SECTION_BLOCKED',
+        `不能开放：区段 ${s.section_id} 已被临时封锁（封锁#${bd.id}，${bd.status === 'pending' ? '待生效' : '已生效'}），封锁原因：${bd.reason}`,
+        { sectionId: s.section_id, blockadeId: bd.id, blockadeStatus: bd.status, blockadeReason: bd.reason });
     }
     const holder = lockingInstance('section', s.section_id);
     if (holder) {
@@ -550,15 +562,23 @@ function getState() {
     // 延时取消：全部申请（值班台显示取消状态与剩余时间）+ pending 按实例索引 + 保护时长
     cancellationRequests: require('./cancellation').listRequests(),
     pendingCancellations: require('./cancellation').pendingByInstance(),
-    cancelProtectionSeconds: require('./cancellation').getProtectionSeconds()
+    cancelProtectionSeconds: require('./cancellation').getProtectionSeconds(),
+    // 临时封锁：全部封锁记录 + 未结束封锁按区段索引（管理员/值班员页面显示封锁状态）
+    blockades: require('./blockade').listBlockades(),
+    activeBlockades: require('./blockade').activeBySection()
   };
 }
 
 /**
- * 状态变化后触发等待申请兑现扫描。懒加载 waiting.js 以避免循环依赖；
- * 兑现本身不应影响已成功的主操作，扫描异常仅记录日志。
+ * 状态变化后先复核待生效封锁、再触发等待申请兑现扫描。懒加载 blockade.js /
+ * waiting.js 以避免循环依赖；复核与兑现本身不应影响已成功的主操作，异常仅记录日志。
  */
 function triggerWaitingSweep(reason) {
+  try {
+    require('./blockade').sweepPending(reason);
+  } catch (e) {
+    console.error('[blockade] 待生效复核失败:', e);
+  }
   try {
     require('./waiting').sweepFulfillments(reason);
   } catch (e) {

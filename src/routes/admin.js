@@ -6,6 +6,7 @@ const { requireAuth } = require('../auth');
 const { getState, triggerWaitingSweep } = require('../interlocking');
 const waiting = require('../waiting');
 const cancellation = require('../cancellation');
+const blockade = require('../blockade');
 
 const router = express.Router();
 router.use(requireAuth('admin'));
@@ -59,6 +60,43 @@ router.put('/settings/cancel-protection', wrap((req, res) => {
   });
 }));
 
+/* ----------------------------- 临时封锁 ----------------------------- */
+
+// 查看封锁记录：默认全部；?status=pending|effective|ended、?sectionId= 可过滤
+router.get('/blockades', (req, res) => {
+  const status = ['pending', 'effective', 'ended'].includes(req.query.status)
+    ? req.query.status : null;
+  const list = blockade.listBlockades({
+    status,
+    sectionId: req.query.sectionId ? String(req.query.sectionId) : undefined
+  });
+  res.json({ ok: true, blockades: list, active: blockade.activeBySection() });
+});
+
+// 发起临时封锁（区段编号 + 封锁原因）；重复申请返回原申请（created:false）
+router.post('/sections/:id/blockade', wrap((req, res) => {
+  const result = blockade.requestBlockade(
+    req.params.id, (req.body || {}).reason, req.session.name
+  );
+  res.status(result.created ? 201 : 200).json({
+    ok: true,
+    created: result.created,
+    blockade: result.blockade
+  });
+}));
+
+// 结束待生效或已生效封锁；结束后按既有联锁规则重试等待兑现
+router.post('/blockades/:id/end', wrap((req, res) => {
+  const result = blockade.endBlockade(
+    Number(req.params.id), req.session.name, (req.body || {}).note
+  );
+  res.json({
+    ok: true,
+    ended: result.ended,
+    blockade: result.blockade
+  });
+}));
+
 /* -------------------------------- 区段 ---------------------------------- */
 
 function validateSection(body) {
@@ -107,6 +145,12 @@ router.delete('/sections/:id', wrap((req, res) => {
   if (used.length) {
     return res.status(409).json({ ok: false,
       error: `区段 ${req.params.id} 仍被进路 ${used.map((u) => u.route_id).join('、')} 引用，请先修改这些进路` });
+  }
+  // 有未结束封锁时不允许删除区段（先结束封锁再删除；外键级联仅作兜底）
+  const bd = blockade.activeBlockadeInTxn(req.params.id);
+  if (bd) {
+    return res.status(409).json({ ok: false,
+      error: `区段 ${req.params.id} 存在${bd.status === 'pending' ? '待生效' : '已生效'}临时封锁（#${bd.id}：${bd.reason}），请先结束封锁再删除区段` });
   }
   const r = db.prepare(`DELETE FROM sections WHERE id=?`).run(req.params.id);
   if (r.changes === 0) return res.status(404).json({ ok: false, error: `区段 ${req.params.id} 不存在` });
@@ -364,6 +408,8 @@ router.post('/reset/state', wrap((req, res) => {
     db.prepare(`UPDATE switches SET position='N'`).run();
     // 管理员重置推演：撤销全部等待申请
     waiting.cancelAllByReset('管理员清空推演状态，全部等待申请撤销');
+    // 管理员重置推演：清除全部封锁记录
+    blockade.clearAllByReset('管理员清空推演状态，封锁记录清除');
   })();
   res.json({ ok: true, state: getState() });
 }));
@@ -381,6 +427,8 @@ router.post('/reset/training', wrap((req, res) => {
     db.prepare(`UPDATE switches SET position='N'`).run();
     // 管理员重置推演：撤销全部等待申请
     waiting.cancelAllByReset('管理员恢复示例初始状态（培训重开），全部等待申请撤销');
+    // 管理员重置推演：清除全部封锁记录
+    blockade.clearAllByReset('管理员恢复示例初始状态（培训重开），封锁记录清除');
   })();
   res.json({ ok: true, state: getState() });
 }));

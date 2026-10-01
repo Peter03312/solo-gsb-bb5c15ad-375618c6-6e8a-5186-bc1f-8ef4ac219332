@@ -11,6 +11,7 @@ const apiRoutes = require('./routes/api');
 const { InterlockError } = require('./interlocking');
 const waiting = require('./waiting');
 const cancellation = require('./cancellation');
+const blockade = require('./blockade');
 
 const PORT = Number(process.env.PORT || 3000);
 
@@ -21,7 +22,16 @@ if (process.env.SEED_DEMO !== '0') {
   if (seeded) console.log('[startup] 已初始化示例站场（R1/R2/R3）');
 }
 
-// 服务重启后自动尝试兑现仍在等待的申请（状态全部来自 SQLite，重启可恢复）
+// 服务重启后：先复核待生效封锁（区段已空闲且无锁则转已生效），再尝试兑现仍在
+// 等待的申请（状态全部来自 SQLite，重启可恢复）
+try {
+  const b = blockade.sweepPending('server_start');
+  if (b.effective.length) {
+    console.log(`[startup] 重启后待生效封锁转为已生效：#${b.effective.join('、#')}`);
+  }
+} catch (e) {
+  console.error('[startup] 封锁待生效复核失败:', e);
+}
 try {
   const r = waiting.sweepFulfillments('server_start');
   if (r.fulfilled.length) {
